@@ -1,0 +1,207 @@
+/* ***********************COPY FROM THE .h HEADER FILE_ *********************************
+    int16_t dc_filter16(int32_t *p, int16_t x);
+    \brief Remove the estimated DC content from a signal sample, without updating the DC estimate.
+    \param p A pointer to the filter state variable.
+    \param x A signal sample to be filtered.
+    \return The signal free of DC content.
+    \see dc_filter16
+    \see dc_filter16_init
+    \see dc_filter16_estimate
+    \see dc_filter24
+    \see dc_filter24_no_update
+    \see dc_filter24_init
+    \see dc_filter24_estimate
+*/
+
+
+/* ******************************************************************************
+ *  dc_filter16.c - DC estimation and removal for 16 bit signals
+ *
+ *  Copyright (C) 2011 Texas Instruments Incorporated - http://www.ti.com/ 
+ *  ALL RIGHTS RESERVED 
+ * 
+*/
+
+#include <inttypes.h>
+#if defined(__MSP430__)
+#include <msp430.h>
+#endif
+#include "emeter-toolkit.h"
+
+int16_t dc_filter(int32_t *p, int16_t x)
+{
+#if defined(__GNUC__)  &&  defined(__MSP430__)
+    int32_t z;
+
+    z = 0x12345678;
+    __asm__ (
+        " mov   %[x],%B[z] \n"
+        " clr   %A[z] \n"
+        " sub   0(%[p]),%A[z] \n"       // subtract filter_state from (sample << 16)
+        " subc  2(%[p]),%B[z] \n"
+        " rla   %A[z] \n"               // >> 14
+        " rlc   %B[z] \n"
+        " jc    1f \n"
+        " rlc   %A[z] \n"
+        " rlc   %B[z] \n"
+        " rlc   %A[z] \n"
+        " and   #0x0003,%A[z] \n"
+        " jmp   2f \n"
+        "1: \n"
+        " rlc   %A[z] \n"
+        " rlc   %B[z] \n"
+        " rlc   %A[z] \n"
+        " bis   #0xFFFC,%A[z] \n"
+        "2: \n"
+        " add   0(%[p]),%B[z] \n"       // + filter_state
+        " addc  2(%[p]),%A[z] \n"
+        " mov   %B[z],0(%[p]) \n"       // save new filter_state
+        " mov   %A[z],2(%[p]) \n"
+        " sub   %A[z],%[x] \n"          // sample - filter_state
+        : [x] "+r"(x)
+        : [p] "r"(p), [z] "r"(z));
+    return x;
+#else
+    *p += ((((int32_t) x << 16) - *p) >> 14);
+    x -= (*p >> 16);
+    return x;
+#endif
+}
+
+int16_t dc_filter_no_update(const int32_t *p, int16_t x)
+{
+    return x - (*p >> 16);
+}
+
+void dc_filter_init(int32_t *p, int16_t x)
+{
+    *p = (int32_t) x << 16;
+}
+
+int32_t dc_filter16_estimate(const int32_t *p)
+{
+    return *p >> 8;
+}
+
+
+
+/* **** EXTRACT OF THE METROLOGY-BACKGROUND.C CODE WHERE IT IS IMPLEMENTED:
+
+static __inline__ int per_sample_dsp(void)
+{
+    int kick;
+    voltage_sample_t V_sample;
+    voltage_sample_t V_corrected;
+#if defined(REACTIVE_POWER_BY_QUADRATURE_SUPPORT)
+    voltage_sample_t V_quad_corrected;
+#endif
+#if defined(FUNDAMENTAL_POWER_SUPPORT)
+    voltage_sample_t V_pure;
+    voltage_sample_t V_quad_pure;
+    int32_t summy;
+#endif
+    current_sample_t I_sample[PER_PHASE_CURRENT_CHANNELS];
+    current_sample_t I_corrected;
+#if defined(RESIDUAL_IRMS_SUPPORT)
+    int32_t I_residue;
+#endif
+#if NUM_PHASES > 1
+    struct phase_parms_s *phase;
+    int ph;
+#endif
+#if defined(LIMP_MODE_SUPPORT)
+    #if NUM_PHASES == 1  &&  defined(NEUTRAL_MONITOR_SUPPORT)
+    static const uint16_t current_pos_masks[PER_PHASE_CURRENT_CHANNELS] = {PHASE_STATUS_I_POS, PHASE_STATUS_I_NEUTRAL_POS};
+    #else
+    static const uint16_t current_pos_masks[PER_PHASE_CURRENT_CHANNELS] = {PHASE_STATUS_I_POS};
+    #endif
+#endif
+#if NUM_PHASES == 1  &&  defined(NEUTRAL_MONITOR_SUPPORT)
+    int ch;
+#endif
+    int k;
+#if defined(MAINS_FREQUENCY_SUPPORT)
+    int x;
+    int y;
+    int z;
+#endif
+    struct phase_dot_prod_set_s *phase_dot_products;
+    struct current_sensor_dot_prod_set_s *sensor_dot_products;
+#if NUM_PHASES > 1  &&  defined(NEUTRAL_MONITOR_SUPPORT)
+    struct neutral_dot_prod_set_s *neutral_dot_products;
+#endif
+    int8_t loggers;
+    int dp;
+
+    /* Filter away the DC bias.
+    
+       Do the phase lag compensation. Use a simple FIR approach,
+       and absorb the non-unity gain of the filter in the overall
+       current/power scaling later on. This is OK for the small
+       phase shifts we expect to get. It would cause dynamic
+       range problems for larger shifts. Note the some of this
+       phase shift is due to the operation of the ADC itself. It
+       performs sequential conversions of its 8 inputs, so there is
+       some time delay between sampling of the various sensors.
+    
+       Accumulate power for each of the channels. These will
+       be divided by the number of samples at the end of the
+       measurement cycles, resulting in an average power
+       value for each source.
+
+       If RMS voltage and/or current readings are required, calculate the
+       dot products needed to evaluate these. */
+
+    kick = true;
+#if defined(RESIDUAL_IRMS_SUPPORT)
+    I_residue = 0;
+#endif
+
+    loggers = 0;
+#if NUM_PHASES > 1
+    for (ph = 0, phase = working_data.phases;  ph < NUM_PHASES;  ph++, phase++)
+#endif
+    {
+        dp = phase->metrology.dp_set ^ 1;
+        phase_dot_products = &phase->metrology.dot_prod[dp];
+
+#if defined(VOLTAGE_SIGNAL_IS_COMMON)
+       if (ph==0)
+       { 
+#endif
+        V_sample = adc_v_buffer[ph];
+        V_sample = dc_filter_voltage(phase->metrology.V_dc_estimate[normal_limp], V_sample);
+         if ((V_sample >= V_ADC_MAX  ||  V_sample <= V_ADC_MIN)  &&  phase->metrology.V_endstops)
+            phase->metrology.V_endstops--;
+        #if defined(VRMS_SUPPORT)  ||  defined(POWER_FACTOR_SUPPORT)
+            #if defined(SAG_SWELL_SUPPORT)
+                sqac_voltage(phase->metrology.V_sq_cycle, V_sample);
+            #else
+                sqac_voltage(phase_dot_products->V_sq, V_sample);
+            #endif
+        #endif
+#if defined(VOLTAGE_SIGNAL_IS_COMMON)
+       }
+#endif        
+
+
+ AFTERWARDS THIS ALSO APPEARS:
+
+
+
+#if defined(VOLTAGE_SIGNAL_IS_COMMON)
+       if (ph==0)
+       { 
+#endif
+        V_sample = adc_v_buffer[ph];
+        V_sample = dc_filter_voltage(phase->metrology.V_dc_estimate[normal_limp], V_sample);
+         if ((V_sample >= V_ADC_MAX  ||  V_sample <= V_ADC_MIN)  &&  phase->metrology.V_endstops)
+            phase->metrology.V_endstops--;
+        #if defined(VRMS_SUPPORT)  ||  defined(POWER_FACTOR_SUPPORT)
+            #if defined(SAG_SWELL_SUPPORT)
+                sqac_voltage(phase->metrology.V_sq_cycle, V_sample);
+            #else
+                sqac_voltage(phase_dot_products->V_sq, V_sample);
+            #endif
+        #endif
+
