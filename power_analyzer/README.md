@@ -71,3 +71,31 @@ The modular DSP makes the documented next steps localized changes:
   `analog_frontend` / `signal_gen`.
 - **Crest factor** — add `peak/rms` per channel in `power_calc`.
 ```
+
+## Live mode (STM32 hardware over USB)
+
+Once the board is flashed (`STM32/CM7`), the firmware streams one raw
+snapshot per second over the ST-Link virtual COM port (115200 8N1):
+`AA 55 AA 55` + 512 int16 V samples + 512 int16 I samples (little-endian,
+10 kHz sample rate). All DSP runs on the PC — the same `dsp/` chain as the
+simulator, adapted to 1-cycle blocks (a frame spans only ~2.5 mains cycles)
+with averaging across frames.
+
+```bash
+cd power_analyzer
+../.venv/bin/python live_main.py                     # auto-detect ST-Link port
+../.venv/bin/python live_main.py --port /dev/ttyACM0 # explicit port
+../.venv/bin/python live_main.py --sim               # no hardware, synthetic frames
+```
+
+The PGA281 gains are fixed by the firmware at boot (`OPTO_ShiftOut(0x5E)`,
+gains 4 & 16); the V/I range combos in the window only set how ADC codes are
+referred back to input volts/amps (defaults `G4` = ±368 V, `G16` = ±3.13 A).
+The wire format matches the reference script `STM32/PA_Monitor_2ch.py`.
+
+New modules: `acquisition/` (protocol parser, serial reader thread, sim
+source), `dsp/live.py` (per-frame processing + averaging),
+`ui/live_window.py` + `live_scope` + `live_results_panel`, `live_main.py`.
+
+> Linux note: reading the serial port requires membership in the `dialout`
+> group (`sudo usermod -aG dialout $USER`, then log out/in).

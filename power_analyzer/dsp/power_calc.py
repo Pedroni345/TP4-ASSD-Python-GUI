@@ -17,9 +17,15 @@ from .zero_crossing import make_blocks
 
 
 def analyze(v_dig: np.ndarray, i_dig: np.ndarray, fs: float = config.FS_DIGITAL,
-            max_harmonic: int = config.MAX_HARMONIC) -> Measurements:
-    """Run the full per-block analysis on the digital signals."""
-    blocks = make_blocks(v_dig, fs)
+            max_harmonic: int = config.MAX_HARMONIC,
+            cycles: int = config.CYCLES_PER_BLOCK,
+            settle: int = config.SETTLE_CROSSINGS) -> Measurements:
+    """Run the full per-block analysis on the digital signals.
+
+    ``cycles``/``settle`` default to the long-capture values; the live path
+    uses 1-cycle blocks because an MCU frame only spans ~2.5 mains cycles.
+    """
+    blocks = make_blocks(v_dig, fs, cycles=cycles, settle=settle)
     if not blocks:
         return Measurements()
 
