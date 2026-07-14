@@ -22,6 +22,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "string.h"
+#include "dsp_pipeline.h"    /* DSP pipeline orchestration */
+#include "dsp_tests.h"       /* DSP test suite (optional) */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -31,6 +33,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+/* Enable DSP test suite at startup (comment out for production) */
+#define RUN_DSP_TESTS_AT_STARTUP 1
 
 /* DUAL_CORE_BOOT_SYNC_SEQUENCE: Define for dual core boot synchronization    */
 /*                             demonstration code based on hardware semaphore */
@@ -94,6 +99,9 @@ static volatile uint8_t snapshot_ready = 0;
 static volatile uint8_t v_half_flag = 0, i_half_flag = 0;
 static volatile uint8_t v_full_flag = 0, i_full_flag = 0;
 static const uint8_t frame_header[4] = {0xAA, 0x55, 0xAA, 0x55};
+
+/* DSP Pipeline Instance - maintains filter state, FFT tables, measurements */
+static DSPPipeline_t dsp_pipeline;
 
 extern UART_HandleTypeDef hcom_uart[];
 
@@ -201,7 +209,15 @@ Error_Handler();
   MX_SPI3_Init();
   /* USER CODE BEGIN 2 */
 
+  /* Initialize DSP Pipeline */
+  if (dsp_pipeline_init(&dsp_pipeline) < 0) {
+      Error_Handler();
+  }
 
+  /* Run DSP test suite if enabled */
+  #if defined(RUN_DSP_TESTS_AT_STARTUP)
+  dsp_run_all_tests();
+  #endif
 
   /* USER CODE END 2 */
 
@@ -291,9 +307,31 @@ Error_Handler();
   {
 	if ((snapshot_ready == 2) && (HAL_GetTick() - last_send_tick >= 1000)) {
 		last_send_tick = HAL_GetTick();
-		HAL_UART_Transmit(&hcom_uart[COM1], (uint8_t*)frame_header,   sizeof(frame_header),   100);
-		HAL_UART_Transmit(&hcom_uart[COM1], (uint8_t*)snapshot_V_buf, sizeof(snapshot_V_buf), 200);
-		HAL_UART_Transmit(&hcom_uart[COM1], (uint8_t*)snapshot_I_buf, sizeof(snapshot_I_buf), 200);
+
+		/* Process frame with DSP pipeline */
+		MeasurementOutput_t measurement_result;
+		int n_blocks = dsp_pipeline_process_frame(
+			&dsp_pipeline,
+			snapshot_V_buf,    /* uint16_t[512] ADC codes for voltage */
+			snapshot_I_buf,    /* uint16_t[512] ADC codes for current */
+			3.0f,              /* ADC reference voltage (±3V differential) */
+			16,                /* ADC resolution (16 bits) */
+			&measurement_result
+		);
+
+		/* Transmit measurement results (NEW BINARY FORMAT) */
+		if (n_blocks > 0) {
+			/* Send measurement frame header */
+			uint32_t header = 0xAA55AA55;
+			HAL_UART_Transmit(&hcom_uart[COM1], (uint8_t*)&header, sizeof(header), 50);
+
+			/* Send measurement struct (binary, ~200 bytes) */
+			HAL_UART_Transmit(&hcom_uart[COM1], (uint8_t*)&measurement_result, sizeof(measurement_result), 100);
+
+			/* Send frame footer for verification */
+			uint32_t footer = 0x55AA55AA;
+			HAL_UART_Transmit(&hcom_uart[COM1], (uint8_t*)&footer, sizeof(footer), 50);
+		}
 
 		__disable_irq();
 		snapshot_ready = 0;
