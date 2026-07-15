@@ -86,22 +86,23 @@ const uint16_t sine_lut_48[48] = {
      452,  586,  744,  926, 1126, 1342, 1571, 1807,
 };
 
-#define N_SAMPLES 512
-#define HALF_SAMPLES (N_SAMPLES / 2)
+#define N_SAMPLES 5120
+#define N_SAMPLES_HALF 2560
 static uint16_t adc_V_buf[N_SAMPLES];
 static uint16_t adc_I_buf[N_SAMPLES];
-static uint16_t spi_tx_V_dummy = 0x0000;   // fixed dummy word, never changes
+static uint16_t spi_tx_V_dummy = 0x0000;
 static uint16_t spi_tx_I_dummy = 0x0000;
-
-static uint16_t snapshot_V_buf[N_SAMPLES];  // stable copy, safe to transmit anytime
-static uint16_t snapshot_I_buf[N_SAMPLES];
-static volatile uint8_t snapshot_ready = 0;
-static volatile uint8_t v_half_flag = 0, i_half_flag = 0;
-static volatile uint8_t v_full_flag = 0, i_full_flag = 0;
-static const uint8_t frame_header[4] = {0xAA, 0x55, 0xAA, 0x55};
 
 /* DSP Pipeline Instance - maintains filter state, FFT tables, measurements */
 static DSPPipeline_t dsp_pipeline;
+
+/* Measurement output - updated by DSP after each half-buffer */
+static MeasurementOutput_t measurement_result;
+static volatile uint8_t result_ready = 0;
+
+/* Interrupt flags - set when each half-buffer is complete */
+static volatile uint8_t v_half_ready = 0, i_half_ready = 0;
+static volatile uint8_t v_full_ready = 0, i_full_ready = 0;
 
 extern UART_HandleTypeDef hcom_uart[];
 
@@ -272,14 +273,16 @@ Error_Handler();
   hdma_spi3_rx.XferHalfCpltCallback = I_RxHalfDone;
   hdma_spi3_rx.XferCpltCallback     = I_RxFullDone;
 
-  /* 1. RX side: normal continuous circular capture, paced by SPI's own RXNE */
+  /* 1. RX side: continuous circular capture with 5120 samples
+     Half-Transfer interrupt fires after 2560 samples (first half complete)
+     Transfer-Complete interrupt fires after 5120 samples (second half complete) */
   HAL_DMA_Start_IT(&hdma_spi1_rx, (uint32_t)&hspi1.Instance->RXDR, (uint32_t)adc_V_buf, N_SAMPLES);
   HAL_DMA_Start_IT(&hdma_spi3_rx, (uint32_t)&hspi3.Instance->RXDR, (uint32_t)adc_I_buf, N_SAMPLES);
 
-  /* 2. "TX" side: TIM8_CH2's DMA request feeds ONE dummy halfword into
-        SPI3->TXDR every time CH2 compare matches (once per 100us) */
-  HAL_DMA_Start(&hdma_tim8_ch2, (uint32_t)&spi_tx_V_dummy, (uint32_t)&hspi1.Instance->TXDR, N_SAMPLES);   /* circular length 1 -> auto re-arms for next period */
-  HAL_DMA_Start(&hdma_tim8_ch3, (uint32_t)&spi_tx_I_dummy, (uint32_t)&hspi3.Instance->TXDR, N_SAMPLES);
+  /* 2. "TX" side: TIM8_CH2/CH3's DMA request feeds ONE dummy halfword into
+        SPI1/SPI3->TXDR every time compare matches (paced by timer) */
+  HAL_DMA_Start(&hdma_tim8_ch2, (uint32_t)&spi_tx_V_dummy, (uint32_t)&hspi1.Instance->TXDR, 1);
+  HAL_DMA_Start(&hdma_tim8_ch3, (uint32_t)&spi_tx_I_dummy, (uint32_t)&hspi3.Instance->TXDR, 1);
 
   __HAL_TIM_ENABLE_DMA(&htim8, TIM_DMA_CC2);
   __HAL_TIM_ENABLE_DMA(&htim8, TIM_DMA_CC3);
@@ -305,41 +308,26 @@ Error_Handler();
 
   while (1)
   {
-	if ((snapshot_ready == 2) && (HAL_GetTick() - last_send_tick >= 1000)) {
+	/* Timer-based transmission (every 1000ms, independent of DSP processing)
+	   DSP processing happens interrupt-driven after each half-buffer (every ~512ms)
+	   This allows multiple DSP results to accumulate, then we send periodically */
+	if (result_ready && (HAL_GetTick() - last_send_tick >= 1000)) {
 		last_send_tick = HAL_GetTick();
 
-		/* Process frame with DSP pipeline */
-		MeasurementOutput_t measurement_result;
-		int n_blocks = dsp_pipeline_process_frame(
-			&dsp_pipeline,
-			snapshot_V_buf,    /* uint16_t[512] ADC codes for voltage */
-			snapshot_I_buf,    /* uint16_t[512] ADC codes for current */
-			3.0f,              /* ADC reference voltage (±3V differential) */
-			16,                /* ADC resolution (16 bits) */
-			&measurement_result
-		);
-
 		/* Transmit measurement results (NEW BINARY FORMAT) */
-		if (n_blocks > 0) {
-			/* Send measurement frame header */
-			uint32_t header = 0xAA55AA55;
-			HAL_UART_Transmit(&hcom_uart[COM1], (uint8_t*)&header, sizeof(header), 50);
+		/* Send measurement frame header */
+		uint32_t header = 0xAA55AA55;
+		HAL_UART_Transmit(&hcom_uart[COM1], (uint8_t*)&header, sizeof(header), 50);
 
-			/* Send measurement struct (binary, ~200 bytes) */
-			HAL_UART_Transmit(&hcom_uart[COM1], (uint8_t*)&measurement_result, sizeof(measurement_result), 100);
+		/* Send measurement struct (binary, ~200 bytes) */
+		HAL_UART_Transmit(&hcom_uart[COM1], (uint8_t*)&measurement_result, sizeof(measurement_result), 100);
 
-			/* Send frame footer for verification */
-			uint32_t footer = 0x55AA55AA;
-			HAL_UART_Transmit(&hcom_uart[COM1], (uint8_t*)&footer, sizeof(footer), 50);
-		}
+		/* Send frame footer for verification */
+		uint32_t footer = 0x55AA55AA;
+		HAL_UART_Transmit(&hcom_uart[COM1], (uint8_t*)&footer, sizeof(footer), 50);
 
-		__disable_irq();
-		snapshot_ready = 0;
-		v_half_flag = 0;
-		i_half_flag = 0;
-		v_full_flag = 0;
-		i_full_flag = 0;
-		__enable_irq();
+		/* Clear result flag after transmission */
+		result_ready = 0;
 	}
     /* USER CODE END WHILE */
 
@@ -813,54 +801,84 @@ static void MX_GPIO_Init(void)
 
 void V_RxHalfDone(DMA_HandleTypeDef *hdma)
 {
-    v_half_flag = 1;
-    if (i_half_flag && snapshot_ready == 0) {
-        memcpy(snapshot_V_buf, adc_V_buf, HALF_SAMPLES * sizeof(uint16_t));
-        memcpy(snapshot_I_buf, adc_I_buf, HALF_SAMPLES * sizeof(uint16_t));
-        snapshot_ready = 1;
-        v_half_flag = 0;
-        i_half_flag = 0;
+    v_half_ready = 1;
+    if (i_half_ready) {
+        /* Process first half of buffer (indices 0 to N_SAMPLES_HALF-1)
+           while DMA is filling second half */
+        dsp_pipeline_process_frame(
+            &dsp_pipeline,
+            &adc_V_buf[0],
+            &adc_I_buf[0],
+            3.0f,
+            16,
+            &measurement_result
+        );
+        result_ready = 1;
+        v_half_ready = 0;
+        i_half_ready = 0;
     }
-    //BSP_LED_Off(LED_YELLOW);
 }
 
 void I_RxHalfDone(DMA_HandleTypeDef *hdma)
 {
-    i_half_flag = 1;
-    if (v_half_flag && snapshot_ready == 0) {
-        memcpy(snapshot_V_buf, adc_V_buf, HALF_SAMPLES * sizeof(uint16_t));
-        memcpy(snapshot_I_buf, adc_I_buf, HALF_SAMPLES * sizeof(uint16_t));
-        snapshot_ready = 1;
-        v_half_flag = 0;
-        i_half_flag = 0;
+    i_half_ready = 1;
+    if (v_half_ready) {
+        /* Process first half of buffer
+           while DMA is filling second half */
+        dsp_pipeline_process_frame(
+            &dsp_pipeline,
+            &adc_V_buf[0],
+            &adc_I_buf[0],
+            3.0f,
+            16,
+            &measurement_result
+        );
+        result_ready = 1;
+        v_half_ready = 0;
+        i_half_ready = 0;
     }
     BSP_LED_Off(LED_YELLOW);
 }
 
 void V_RxFullDone(DMA_HandleTypeDef *hdma)
 {
-    v_full_flag = 1;
-    if (i_full_flag && snapshot_ready == 1) {
-        memcpy(&snapshot_V_buf[HALF_SAMPLES], &adc_V_buf[HALF_SAMPLES], HALF_SAMPLES * sizeof(uint16_t));
-        memcpy(&snapshot_I_buf[HALF_SAMPLES], &adc_I_buf[HALF_SAMPLES], HALF_SAMPLES * sizeof(uint16_t));
-        snapshot_ready = 2;   // frame completo (V + I), listo para transmitir
-        v_full_flag = 0;
-        i_full_flag = 0;
+    v_full_ready = 1;
+    if (i_full_ready) {
+        /* Process second half of buffer (indices N_SAMPLES_HALF to N_SAMPLES-1)
+           while DMA is filling first half again */
+        dsp_pipeline_process_frame(
+            &dsp_pipeline,
+            &adc_V_buf[N_SAMPLES_HALF],
+            &adc_I_buf[N_SAMPLES_HALF],
+            3.0f,
+            16,
+            &measurement_result
+        );
+        result_ready = 1;
+        v_full_ready = 0;
+        i_full_ready = 0;
     }
     BSP_LED_On(LED_YELLOW);
 }
 
 void I_RxFullDone(DMA_HandleTypeDef *hdma)
 {
-    i_full_flag = 1;
-    if (v_full_flag && snapshot_ready == 1) {
-        memcpy(&snapshot_V_buf[HALF_SAMPLES], &adc_V_buf[HALF_SAMPLES], HALF_SAMPLES * sizeof(uint16_t));
-        memcpy(&snapshot_I_buf[HALF_SAMPLES], &adc_I_buf[HALF_SAMPLES], HALF_SAMPLES * sizeof(uint16_t));
-        snapshot_ready = 2;
-        v_full_flag = 0;
-        i_full_flag = 0;
+    i_full_ready = 1;
+    if (v_full_ready) {
+        /* Process second half of buffer
+           while DMA is filling first half again */
+        dsp_pipeline_process_frame(
+            &dsp_pipeline,
+            &adc_V_buf[N_SAMPLES_HALF],
+            &adc_I_buf[N_SAMPLES_HALF],
+            3.0f,
+            16,
+            &measurement_result
+        );
+        result_ready = 1;
+        v_full_ready = 0;
+        i_full_ready = 0;
     }
-    //BSP_LED_On(LED_YELLOW);
 }
 
 // Call once at startup (e.g. in main() after SystemClock_Config)

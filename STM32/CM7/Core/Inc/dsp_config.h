@@ -27,8 +27,10 @@ extern "C" {
 
 #define FS_DIGITAL              5000        /**< Digital sample rate (Hz) */
 #define FS_MCU                  5000        /**< Actual STM32 sampling rate (Hz) */
-#define N_SAMPLES               512         /**< Buffer size (samples per frame) */
+#define N_SAMPLES               5120        /**< Buffer size (samples per frame) - 10x improvement for zero-loss guarantee */
+#define N_SAMPLES_HALF          2560        /**< Half-buffer for DMA circular mode (N_SAMPLES / 2) */
 #define SAMPLE_PERIOD_US        200         /**< 1/FS_DIGITAL in microseconds */
+#define BUFFER_FILL_TIME_MS     1024        /**< Time to fill full buffer: N_SAMPLES / FS_DIGITAL (ms) */
 
 /* ADC Configuration */
 #define ADC_BITS                16          /**< ADC resolution (bits) */
