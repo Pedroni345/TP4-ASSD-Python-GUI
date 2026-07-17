@@ -1,0 +1,16 @@
+{
+  "enabledPlugins": {
+    "ui-ux-pro-max@ui-ux-pro-max-skill": true
+  },
+  "claudeMdExcludes": [
+    "**/.claude/rules/zh/**",
+    "**/.claude/rules/web/**"
+  ],
+  "permissions": {
+    "deny": [
+      "Read(./power_analyzer/**)",
+      "Read(./STM32/CM4/**)",
+      "Read(./STM32/CM7/Debug/**)"
+    ]
+  }
+}

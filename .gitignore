@@ -14,5 +14,6 @@ env/
 .idea/
 .DS_Store
 
-# Claude Code local files
-.claude/
+# Claude Code: track shared settings.json, ignore personal/local files
+.claude/*
+!.claude/settings.json
