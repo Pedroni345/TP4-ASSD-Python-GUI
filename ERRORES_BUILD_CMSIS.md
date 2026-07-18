@@ -65,6 +65,26 @@ los borró y expuso todos los problemas latentes de una vez.
   `sqrtf`, etc., que los aporta `-lc -lm` en el link. No hay más archivos de
   CMSIS faltantes escondidos.
 
+## Error 5 — `arm_math_types.h: No such file or directory` (solo en la otra laptop)
+
+- **Síntoma:** después de clonar el repo en la segunda laptop, el build volvía a
+  fallar por headers CMSIS faltantes, aunque en la máquina original compilaba.
+- **Causa:** los 14 headers de nivel superior de `Drivers/CMSIS/Include/`
+  (`arm_math.h`, `arm_math_types.h`, `arm_common_tables.h`, …) **nunca
+  estuvieron trackeados en git**: existían solo en el disco de la máquina
+  original. El fix del Error 1 commiteó la subcarpeta `dsp/`, pero sus
+  compañeros de nivel superior quedaron afuera. El build local pasaba (los
+  archivos estaban en el disco); un clon fresco no los recibía.
+- **Fix (`8f24175`):** se agregaron los 14 headers a git. `arm_vec_fft.h` no
+  hace falta (solo se incluye bajo guardas `ARM_MATH_MVEF`/Helium, que un
+  Cortex-M7 nunca activa). La carpeta local `Drivers/CMSIS_DSP_Source/` (12 MB,
+  stash de donde se copiaron archivos a mano) no se commitea: el build no la
+  referencia.
+- **Verificación definitiva:** se hizo un **clon fresco desde git** (solo
+  archivos trackeados) y ahí compilan los 21 fuentes DSP **y también**
+  `main.c`, `stm32h7xx_it.c`, `stm32h7xx_hal_msp.c` y el system file con los
+  include paths del IDE. El repo ya es autocontenido.
+
 ## Regla para el futuro
 
 - **CMSIS-DSP está vendoreado en la versión v1.15.0.** Si alguna vez hay que
@@ -73,3 +93,7 @@ los borró y expuso todos los problemas latentes de una vez.
   lo que hizo que los headers v1.10 no sirvieran.
 - Los `.o` viejos trackeados en `Debug/` fueron los que enmascararon todo esto
   durante semanas; conviene dejar de trackear esa carpeta.
+- **Un build verde en la máquina donde se crearon los archivos no prueba que el
+  repo esté completo — git solo entrega lo que trackea.** Después de vendorear
+  cualquier archivo, verificar con `git ls-files <ruta>` que git lo tomó, y
+  ante la duda validar con un clon fresco.
