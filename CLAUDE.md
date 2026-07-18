@@ -53,7 +53,14 @@ Sensor scale factors (V/V, A/V) are not yet applied anywhere.
 - Old status/summary markdowns were intentionally deleted; don't recreate them.
 - CMSIS-DSP is vendored at v1.15.0: sources in `CM7/Core/Src/CMSIS_DSP/`,
   headers (incl. `dsp/` subfolder) in `Drivers/CMSIS/Include/`. If more CMSIS
-  sources are ever added, take them from that same tag.
+  sources are ever added, take them from that same tag — never mix versions.
+- Build-fix history (2026-07-18, details in `ERRORES_BUILD_CMSIS.md`): the first
+  clean build ever exposed four latent errors, fixed in `6ab0c2b`..`78c2cd5` —
+  missing `dsp/*.h` headers, bogus typedefs in `filters.h`/`goertzel.h` (now the
+  real `arm_biquad_casd_df1_inst_f32` / `arm_rfft_fast_instance_f32`), the
+  host-only test colliding at link (moved to `STM32/host_tests/`), and three
+  missing FFT sources. Stale `.o` files tracked in `Debug/` had masked all of
+  it; don't trust incremental builds as proof the repo compiles.
 
 ## Conventions
 
