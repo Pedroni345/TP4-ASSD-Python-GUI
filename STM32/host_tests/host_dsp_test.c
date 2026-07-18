@@ -2,7 +2,11 @@
  * @file host_dsp_test.c
  * @brief Host-based DSP testing (no hardware required)
  *
- * Compiles and runs on Linux/Mac/Windows for immediate validation
+ * Compiles and runs on Linux/Mac/Windows for immediate validation.
+ * Standalone program — must stay OUTSIDE the CubeIDE source folders
+ * (it redefines the DSP functions and main).
+ *
+ * Build: gcc host_dsp_test.c -I../CM7/Core/Inc -lm -o host_dsp_test
  */
 
 #include <stdio.h>
