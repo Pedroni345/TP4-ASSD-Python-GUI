@@ -75,8 +75,8 @@ def create_frame(measurement: SyntheticMeasurement) -> bytes:
     """
     Create binary frame matching STM32 output format.
 
-    Frame structure:
-        Header (4) + Measurements (212) + Footer (4) = 220 bytes
+    Frame structure (matches stm32_measurement_reader.FRAME_FORMAT):
+        Header (4) + Measurements (252) + Footer (4) = 260 bytes
     """
     if measurement.v_harmonics is None:
         v_harm, i_harm = create_synthetic_harmonics(measurement.thd_v / 100.0)
@@ -84,13 +84,14 @@ def create_frame(measurement: SyntheticMeasurement) -> bytes:
         v_harm = measurement.v_harmonics
         i_harm = measurement.i_harmonics
 
-    # Struct format: Header + 15 floats + 23 floats + 23 floats + n_blocks/reserved + Footer
-    fmt = '!I' + '15f' + '23f' + '23f' + 'HHI'
+    # Little-endian, mirrors MeasurementOutput_t: 14 floats + 24f + 24f
+    # harmonic arrays (index 0 unused) + n_blocks + v_gain/i_gain
+    fmt = '<I' + '14f' + '24f' + '24f' + 'HBBI'
 
     data = struct.pack(
         fmt,
         0xAA55AA55,  # Header
-        # Measurements (15 floats)
+        # Measurements (14 floats)
         measurement.vrms,
         measurement.irms,
         measurement.frequency,
@@ -105,11 +106,11 @@ def create_frame(measurement: SyntheticMeasurement) -> bytes:
         measurement.dpf,
         measurement.thd_v,
         measurement.thd_i,
-        0.0,  # Placeholder
-        *v_harm,  # 23 floats
-        *i_harm,  # 23 floats
+        0.0, *v_harm,  # 24 floats (index 0 unused)
+        0.0, *i_harm,  # 24 floats (index 0 unused)
         measurement.n_blocks,  # uint16
-        0,  # uint16 reserved
+        1,   # v_gain = 1: synthetic values are already physical, no rescale
+        1,   # i_gain = 1
         0x55AA55AA  # Footer
     )
 

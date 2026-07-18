@@ -109,6 +109,7 @@ class LiveMeasurementPanel(QWidget):
         # Statistics
         layout.addWidget(self._create_value_display("Blocks Averaged", "blocks_count", ""), row, 0)
         layout.addWidget(self._create_value_display("Last Update", "last_update", ""), row, 1)
+        layout.addWidget(self._create_value_display("PGA Gains (V / I)", "pga_gains", ""), row, 2)
 
         self.setLayout(layout)
 
@@ -159,6 +160,7 @@ class LiveMeasurementPanel(QWidget):
         self._set_value("dpf", f"{measurement.dpf:.3f}")
         self._set_value("blocks_count", f"{measurement.n_blocks}")
         self._set_value("last_update", time.strftime("%H:%M:%S"))
+        self._set_value("pga_gains", f"{measurement.v_gain}x / {measurement.i_gain}x")
 
     def _set_value(self, key: str, value: str):
         """Set a value label"""
@@ -260,6 +262,30 @@ class MainWindow(QMainWindow):
         self.status_label.setStyleSheet("color: red; font-weight: bold;")
         control_layout.addWidget(self.status_label)
 
+        # PGA281 gain selection (voltage & current differential gain stages)
+        gain_group = QGroupBox("PGA Gain")
+        gain_layout = QHBoxLayout()
+
+        gain_layout.addWidget(QLabel("Voltage:"))
+        self.v_gain_combo = QComboBox()
+        self.v_gain_combo.addItems([str(g) for g in STM32Reader.PGA_GAINS])
+        self.v_gain_combo.setCurrentText("4")   # firmware default
+        gain_layout.addWidget(self.v_gain_combo)
+
+        gain_layout.addWidget(QLabel("Current:"))
+        self.i_gain_combo = QComboBox()
+        self.i_gain_combo.addItems([str(g) for g in STM32Reader.PGA_GAINS])
+        self.i_gain_combo.setCurrentText("16")  # firmware default
+        gain_layout.addWidget(self.i_gain_combo)
+
+        self.apply_gain_btn = QPushButton("Apply")
+        self.apply_gain_btn.clicked.connect(self.apply_pga_gains)
+        self.apply_gain_btn.setEnabled(False)   # needs connection
+        gain_layout.addWidget(self.apply_gain_btn)
+
+        gain_group.setLayout(gain_layout)
+        control_layout.addWidget(gain_group)
+
         control_layout.addStretch()
         main_layout.addLayout(control_layout)
 
@@ -344,6 +370,19 @@ class MainWindow(QMainWindow):
             self.reader_thread = None
         self.connect_btn.setText("Connect")
         self.connect_btn.setStyleSheet("")
+        self.apply_gain_btn.setEnabled(False)
+
+    def apply_pga_gains(self):
+        """Send selected PGA281 gains to the STM32"""
+        v_gain = int(self.v_gain_combo.currentText())
+        i_gain = int(self.i_gain_combo.currentText())
+
+        if self.reader and self.reader.set_pga_gains(v_gain, i_gain):
+            self.status_label.setText(f"Gains set: V={v_gain}x, I={i_gain}x ✓")
+            self.status_label.setStyleSheet("color: green; font-weight: bold;")
+        else:
+            self.status_label.setText("Failed to send gains ✗")
+            self.status_label.setStyleSheet("color: orange; font-weight: bold;")
 
     def on_new_measurement(self, measurement: PowerMeasurement):
         """Handle new measurement from STM32"""
@@ -355,9 +394,11 @@ class MainWindow(QMainWindow):
         if connected:
             self.status_label.setText("Connected ✓")
             self.status_label.setStyleSheet("color: green; font-weight: bold;")
+            self.apply_gain_btn.setEnabled(True)
         else:
             self.status_label.setText("Connection Failed ✗")
             self.status_label.setStyleSheet("color: red; font-weight: bold;")
+            self.apply_gain_btn.setEnabled(False)
 
     def on_error(self, error_msg: str):
         """Handle error message"""

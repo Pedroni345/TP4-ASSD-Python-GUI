@@ -106,6 +106,21 @@ static volatile uint8_t v_full_ready = 0, i_full_ready = 0;
 
 extern UART_HandleTypeDef hcom_uart[];
 
+/* PGA281 gain command reception from PC GUI over the same VCP UART.
+   Protocol: ASCII line "GAIN,<v_gain>,<i_gain>\n" (gains: 1,2,4,...,128) */
+#define PGA_CMD_BUF_LEN 32
+#define PGA_DEFAULT_V_GAIN 4
+#define PGA_DEFAULT_I_GAIN 16
+static uint8_t pga_rx_byte;
+static char pga_cmd_buf[PGA_CMD_BUF_LEN];
+static volatile uint8_t pga_cmd_len = 0;
+static volatile uint8_t pga_cmd_ready = 0;
+
+/* Gains currently applied to the hardware; echoed in every measurement frame
+   so the PC always scales with the real active gains */
+static volatile uint16_t pga_active_v_gain = PGA_DEFAULT_V_GAIN;
+static volatile uint16_t pga_active_i_gain = PGA_DEFAULT_I_GAIN;
+
 // prototipos
 void V_RxHalfDone(DMA_HandleTypeDef *hdma);
 void V_RxFullDone(DMA_HandleTypeDef *hdma);
@@ -115,6 +130,9 @@ void DWT_Init(void);
 int DWT_Verify(void);
 static inline void delay_us(uint32_t us);
 void OPTO_ShiftOut(uint8_t data);
+uint8_t GetPGAGainCode(uint16_t gain);
+void SetPGA_Gains(uint16_t voltage_gain, uint16_t current_gain);
+static void PGA_ProcessCommand(void);
 
 /* USER CODE END PV */
 
@@ -249,8 +267,14 @@ Error_Handler();
   if (DWT_Verify()){
 	  BSP_LED_On(LED_RED);
   }
-  //OPTO_ShiftOut(0x40); // PGA281 gain = 2
-  OPTO_ShiftOut(0x5E); // PGA281 gain = 4 & 16
+  /* PGA281 default gains (V=4, I=16 -> shift_data 0x5E, same as previous
+     hardcoded value). Changeable at runtime via "GAIN,<v>,<i>\n" from the GUI. */
+  SetPGA_Gains(PGA_DEFAULT_V_GAIN, PGA_DEFAULT_I_GAIN);
+
+  /* Listen for PGA gain commands on the VCP UART (byte-by-byte, interrupt) */
+  HAL_NVIC_SetPriority(USART3_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(USART3_IRQn);
+  HAL_UART_Receive_IT(&hcom_uart[COM1], &pga_rx_byte, 1);
 
 
   HAL_OPAMP_SelfCalibrate(&hopamp2); // OPAMP para el filtro reconstructor
@@ -314,6 +338,10 @@ Error_Handler();
 	if (result_ready && (HAL_GetTick() - last_send_tick >= 1000)) {
 		last_send_tick = HAL_GetTick();
 
+		/* Stamp the active PGA gains so the PC can rescale to physical units */
+		measurement_result.v_gain = (uint8_t)pga_active_v_gain;
+		measurement_result.i_gain = (uint8_t)pga_active_i_gain;
+
 		/* Transmit measurement results (NEW BINARY FORMAT) */
 		/* Send measurement frame header */
 		uint32_t header = 0xAA55AA55;
@@ -328,6 +356,13 @@ Error_Handler();
 
 		/* Clear result flag after transmission */
 		result_ready = 0;
+	}
+
+	/* Apply PGA gain change requested by the GUI (parsed outside the ISR
+	   because OPTO_ShiftOut busy-waits with delay_us) */
+	if (pga_cmd_ready) {
+		PGA_ProcessCommand();
+		pga_cmd_ready = 0;
 	}
     /* USER CODE END WHILE */
 
@@ -929,6 +964,115 @@ void OPTO_ShiftOut(uint8_t data)
     HAL_GPIO_WritePin(OPTO_RCLK_GPIO_Port, OPTO_RCLK_Pin, GPIO_PIN_RESET);
 }
 
+/* PGA281 binary gain codes (G3:G0), datasheet table: 0b0011 = gain 1 */
+uint8_t GetPGAGainCode(uint16_t gain)
+{
+    switch (gain)
+    {
+                               // G3:G0
+        case 1:   return 0x03; // 0011
+        case 2:   return 0x04; // 0100
+        case 4:   return 0x05; // 0101
+        case 8:   return 0x06; // 0110
+        case 16:  return 0x07; // 0111
+        case 32:  return 0x08; // 1000
+        case 64:  return 0x09; // 1001
+        case 128: return 0x0A; // 1010
+        default:  return 0x03; // Default to Gain 1 if invalid input is given
+    }
+}
+
+void SetPGA_Gains(uint16_t voltage_gain, uint16_t current_gain)
+{
+    uint8_t v_code = GetPGAGainCode(voltage_gain);
+    uint8_t i_code = GetPGAGainCode(current_gain);
+
+    // 1. Position Voltage Code
+    // Standard order mapping to upper nibble: QH=G3_V ... QE=G0_V
+    uint8_t shift_data = (v_code << 4);
+
+    // 2. Position Current Code
+    // The current pins are wired in reverse order to the lower nibble:
+    // QA(bit 0) = G3_I, QB(bit 1) = G2_I, QC(bit 2) = G1_I, QD(bit 3) = G0_I
+    // Therefore, we must reverse the 4 bits of i_code
+    uint8_t i_code_reversed = 0;
+    if (i_code & 0x01) i_code_reversed |= 0x08; // bit 0 moves to bit 3
+    if (i_code & 0x02) i_code_reversed |= 0x04; // bit 1 moves to bit 2
+    if (i_code & 0x04) i_code_reversed |= 0x02; // bit 2 moves to bit 1
+    if (i_code & 0x08) i_code_reversed |= 0x01; // bit 3 moves to bit 0
+
+    // Combine both nibbles
+    shift_data |= i_code_reversed;
+
+    // 3. Send out to the shift register
+    OPTO_ShiftOut(shift_data);
+
+    /* Record for the measurement-frame gain echo */
+    pga_active_v_gain = voltage_gain;
+    pga_active_i_gain = current_gain;
+}
+
+static int PGA_IsValidGain(uint16_t gain)
+{
+    return (gain >= 1) && (gain <= 128) &&
+           ((gain & (gain - 1)) == 0);  /* power of two */
+}
+
+/* Parse "GAIN,<v>,<i>" accumulated by the RX interrupt and apply it.
+   Invalid or malformed commands are silently ignored (gains unchanged). */
+static void PGA_ProcessCommand(void)
+{
+    unsigned int v_gain = 0, i_gain = 0;
+
+    if (sscanf(pga_cmd_buf, "GAIN,%u,%u", &v_gain, &i_gain) == 2 &&
+        PGA_IsValidGain((uint16_t)v_gain) && PGA_IsValidGain((uint16_t)i_gain))
+    {
+        SetPGA_Gains((uint16_t)v_gain, (uint16_t)i_gain);
+    }
+}
+
+/* Byte-by-byte RX: accumulate a command line, flag it on newline.
+   While a command is pending (pga_cmd_ready), incoming bytes are dropped
+   so the buffer stays stable until the main loop consumes it. */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART3)
+    {
+        char c = (char)pga_rx_byte;
+
+        if (!pga_cmd_ready)
+        {
+            if (c == '\n' || c == '\r')
+            {
+                if (pga_cmd_len > 0)
+                {
+                    pga_cmd_buf[pga_cmd_len] = '\0';
+                    pga_cmd_ready = 1;
+                }
+                pga_cmd_len = 0;
+            }
+            else if (pga_cmd_len < PGA_CMD_BUF_LEN - 1)
+            {
+                pga_cmd_buf[pga_cmd_len++] = c;
+            }
+            else
+            {
+                pga_cmd_len = 0;  /* line too long: discard */
+            }
+        }
+
+        HAL_UART_Receive_IT(&hcom_uart[COM1], &pga_rx_byte, 1);
+    }
+}
+
+/* Re-arm reception after UART errors (e.g. overrun), otherwise RX stops */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART3)
+    {
+        HAL_UART_Receive_IT(&hcom_uart[COM1], &pga_rx_byte, 1);
+    }
+}
 
 /* USER CODE END 4 */
 

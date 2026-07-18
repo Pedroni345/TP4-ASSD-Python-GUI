@@ -28,38 +28,43 @@ class PowerMeasurement:
     dpf: float               # Displacement power factor
     thd_v: float             # Voltage THD (%)
     thd_i: float             # Current THD (%)
-    v_harmonics: list        # V_k/V_1 normalized [0..22]
-    i_harmonics: list        # I_k/I_1 normalized [0..22]
+    v_harmonics: list        # V_k/V_1 normalized, orders 1..23
+    i_harmonics: list        # I_k/I_1 normalized, orders 1..23
     n_blocks: int            # Number of blocks averaged
+    v_gain: int              # Active PGA281 voltage gain (echoed by firmware)
+    i_gain: int              # Active PGA281 current gain (echoed by firmware)
 
 
 class STM32Reader:
     """
     Reads processed measurement frames from STM32 over UART.
 
-    Binary Protocol:
+    Binary Protocol (little-endian, mirrors MeasurementOutput_t in power_calc.h):
     ┌──────────────────────────────────────────┐
     │ Header:         0xAA55AA55     (4 bytes) │
     │ Vrms, Irms, Frequency          (12 bytes)│
     │ P_total, Q_total, S_total      (12 bytes)│
     │ TPF, P_fund, Q_fund, S_fund    (16 bytes)│
     │ Phi_deg, DPF, THD_V, THD_I     (16 bytes)│
-    │ V_harmonics[23]                (92 bytes)│
-    │ I_harmonics[23]                (92 bytes)│
-    │ N_blocks, Reserved             (4 bytes) │
+    │ V_harmonics[24]                (96 bytes)│
+    │ I_harmonics[24]                (96 bytes)│
+    │ N_blocks, V_gain, I_gain       (4 bytes) │
     │ Footer:         0x55AA55AA     (4 bytes) │
     ├──────────────────────────────────────────┤
-    │ Total:                        (~200 bytes)│
+    │ Total:                        (260 bytes)│
     └──────────────────────────────────────────┘
+
+    Note: harmonic arrays are indexed by order (index 0 unused, k=1..23).
+    The firmware echoes the active PGA gains in every frame; readings are
+    divided by them here so displayed values are physical (sensor-referred).
     """
 
-    # Binary struct format (adjust based on actual C struct layout)
-    # 'I' = uint32 (header)
-    # '23f' = 23×float32 (V_harmonics)
-    # '23f' = 23×float32 (I_harmonics)
-    # 'HHI' = uint16, uint16, uint32 (n_blocks, reserved, footer)
-    FRAME_FORMAT = '!I3f3f4f4f23f23fHHI'  # Packed binary
-    FRAME_SIZE = 204  # bytes (will adjust after testing)
+    # Binary struct format matching the C struct layout (little-endian '<'):
+    # 'I' = uint32 header, '14f' = measurement floats,
+    # '24f' ×2 = harmonic arrays, 'H' = n_blocks,
+    # 'BB' = v_gain, i_gain (uint8), 'I' = uint32 footer
+    FRAME_FORMAT = '<I14f24f24fHBBI'
+    FRAME_SIZE = struct.calcsize(FRAME_FORMAT)  # 260 bytes
 
     def __init__(self, port: str = '/dev/ttyUSB0', baudrate: int = 115200, timeout: float = 2.0):
         """
@@ -129,7 +134,7 @@ class STM32Reader:
                 return None
 
             # Combine header with payload
-            full_frame = struct.pack('!I', header) + frame_payload
+            full_frame = struct.pack('<I', header) + frame_payload
 
             # Parse binary structure
             try:
@@ -145,9 +150,9 @@ class STM32Reader:
             p_total, q_total, s_total = parsed[4:7]
             tpf, p_fund, q_fund, s_fund = parsed[7:11]
             phi_deg, dpf, thd_v, thd_i = parsed[11:15]
-            v_harmonics = list(parsed[15:38])  # 23 floats
-            i_harmonics = list(parsed[38:61])  # 23 floats
-            n_blocks, reserved, footer = parsed[61:64]
+            v_harmonics = list(parsed[15:39])  # 24 floats, index = harmonic order
+            i_harmonics = list(parsed[39:63])  # 24 floats, index = harmonic order
+            n_blocks, v_gain, i_gain, footer = parsed[63:67]
 
             # Verify frame boundaries
             if header_val != 0xAA55AA55:
@@ -160,27 +165,37 @@ class STM32Reader:
                 print(f"⚠ Invalid footer: {hex(footer)}")
                 # Don't fail on footer, it might be struct packing issue
 
+            # Rescale to physical (sensor-referred) units using the PGA gains
+            # echoed by the firmware. The DSP reports ADC-referred values, so
+            # amplitudes divide by the channel gain and powers by the product.
+            # Gain 0 means old firmware without the echo: leave values as-is.
+            v_scale = 1.0 / v_gain if v_gain in self.PGA_GAINS else 1.0
+            i_scale = 1.0 / i_gain if i_gain in self.PGA_GAINS else 1.0
+            p_scale = v_scale * i_scale
+
             # Create measurement object
             self.frame_count += 1
 
             return PowerMeasurement(
-                vrms=vrms,
-                irms=irms,
+                vrms=vrms * v_scale,
+                irms=irms * i_scale,
                 frequency=frequency,
-                p_total=p_total,
-                q_total=q_total,
-                s_total=s_total,
+                p_total=p_total * p_scale,
+                q_total=q_total * p_scale,
+                s_total=s_total * p_scale,
                 tpf=tpf,
-                p_fund=p_fund,
-                q_fund=q_fund,
-                s_fund=s_fund,
+                p_fund=p_fund * p_scale,
+                q_fund=q_fund * p_scale,
+                s_fund=s_fund * p_scale,
                 phi_deg=phi_deg,
                 dpf=dpf,
                 thd_v=thd_v,
                 thd_i=thd_i,
-                v_harmonics=v_harmonics,
-                i_harmonics=i_harmonics,
-                n_blocks=n_blocks
+                v_harmonics=v_harmonics[1:],  # drop unused index 0 -> orders 1..23
+                i_harmonics=i_harmonics[1:],
+                n_blocks=n_blocks,
+                v_gain=v_gain,
+                i_gain=i_gain
             )
 
         except Exception as e:
@@ -192,7 +207,8 @@ class STM32Reader:
         """
         Synchronize to frame header (0xAA55AA55).
 
-        Reads bytes until finding the 4-byte header pattern.
+        Reads bytes until finding the 4-byte header pattern. The STM32 sends
+        the uint32 little-endian, so the wire bytes are 55 AA 55 AA.
 
         Returns:
             Header value (0xAA55AA55) on success, None on timeout
@@ -208,13 +224,46 @@ class STM32Reader:
 
             buf = (buf + b)[-4:]  # Keep last 4 bytes
 
-            if buf == b'\xaa\x55\xaa\x55':
+            if buf == b'\x55\xaa\x55\xaa':
                 return 0xAA55AA55
 
             attempts += 1
 
         print(f"✗ Header sync timeout after {max_attempts} attempts")
         return None
+
+    # Valid PGA281 gains selectable through the shift register
+    PGA_GAINS = (1, 2, 4, 8, 16, 32, 64, 128)
+
+    def set_pga_gains(self, voltage_gain: int, current_gain: int) -> bool:
+        """
+        Send a PGA281 gain command to the STM32.
+
+        Protocol: ASCII line "GAIN,<v_gain>,<i_gain>\\n". The firmware decodes
+        the gains into shift-register bits and updates both PGA gain stages.
+
+        Args:
+            voltage_gain: PGA gain for the voltage channel (1..128, power of 2)
+            current_gain: PGA gain for the current channel (1..128, power of 2)
+
+        Returns:
+            True if the command was written to the serial port
+        """
+        if voltage_gain not in self.PGA_GAINS or current_gain not in self.PGA_GAINS:
+            print(f"✗ Invalid PGA gain: V={voltage_gain}, I={current_gain}")
+            return False
+
+        if not self.serial or not self.serial.is_open:
+            print("✗ Cannot set PGA gains: serial port not open")
+            return False
+
+        try:
+            self.serial.write(f"GAIN,{voltage_gain},{current_gain}\n".encode('ascii'))
+            print(f"✓ PGA gains sent: V={voltage_gain}x, I={current_gain}x")
+            return True
+        except serial.SerialException as e:
+            print(f"✗ Failed to send PGA gains: {e}")
+            return False
 
     def get_stats(self) -> dict:
         """Get reader statistics"""

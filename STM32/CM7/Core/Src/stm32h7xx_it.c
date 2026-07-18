@@ -63,7 +63,7 @@ extern SPI_HandleTypeDef hspi3;
 extern DMA_HandleTypeDef hdma_tim8_ch2;
 extern DMA_HandleTypeDef hdma_tim8_ch3;
 /* USER CODE BEGIN EV */
-
+extern UART_HandleTypeDef hcom_uart[];
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -317,5 +317,12 @@ void DMA2_Stream0_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-
+/**
+  * @brief This function handles USART3 global interrupt (VCP COM1).
+  *        Used to receive PGA gain commands from the PC GUI.
+  */
+void USART3_IRQHandler(void)
+{
+  HAL_UART_IRQHandler(&hcom_uart[COM1]);
+}
 /* USER CODE END 1 */

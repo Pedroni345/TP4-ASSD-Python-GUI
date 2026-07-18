@@ -88,6 +88,8 @@ typedef struct {
 
     /* Metadata */
     uint16_t n_blocks;          /**< Number of blocks averaged */
+    uint8_t v_gain;             /**< Active PGA281 voltage-channel gain (1..128) */
+    uint8_t i_gain;             /**< Active PGA281 current-channel gain (1..128) */
 } MeasurementOutput_t;
 
 /**@}*/
