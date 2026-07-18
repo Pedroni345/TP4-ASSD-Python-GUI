@@ -73,7 +73,7 @@ typedef struct {
  * FFT processing state (maintains CMSIS FFT instance)
  */
 typedef struct {
-    arm_rfft_fast_f32_t fft_instance;       /**< CMSIS Real FFT instance */
+    arm_rfft_fast_instance_f32 fft_instance; /**< CMSIS Real FFT instance */
     float32_t fft_output[FFT_SIZE * 2];     /**< FFT output buffer (real + complex interleaved) */
     float32_t window_coeffs[FFT_SIZE];      /**< Hann window coefficients */
     uint8_t initialized;                    /**< Initialization flag */

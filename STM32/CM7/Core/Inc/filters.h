@@ -47,7 +47,7 @@ extern "C" {
  * - a2 = 0
  */
 typedef struct {
-    arm_biquad_cascade_df1_f32_t biquad;    /**< CMSIS biquad cascade state */
+    arm_biquad_casd_df1_inst_f32 biquad;    /**< CMSIS biquad cascade state */
     float32_t coeffs[5];                    /**< Biquad coefficients [b0, b1, b2, a1, a2] */
     float32_t state[4];                     /**< Filter state variables */
 } HighPassFilterState_t;

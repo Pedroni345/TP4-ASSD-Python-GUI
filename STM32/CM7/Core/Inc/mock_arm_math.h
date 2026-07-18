@@ -47,6 +47,9 @@ typedef struct {
     float32_t *pCoeffs;
 } arm_biquad_cascade_df1_instance_f32;
 
+/* Alias matching the real CMSIS-DSP instance type name used in filters.h */
+typedef arm_biquad_cascade_df1_instance_f32 arm_biquad_casd_df1_inst_f32;
+
 static inline void arm_biquad_cascade_df1_f32(
     const arm_biquad_cascade_df1_instance_f32 *S,
     const float32_t *pSrc,
