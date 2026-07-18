@@ -51,9 +51,9 @@ Sensor scale factors (V/V, A/V) are not yet applied anywhere.
 - `STM32/**/Drivers/` is ST HAL/CMSIS vendor code — read only for a specific
   signature; never review or refactor it.
 - Old status/summary markdowns were intentionally deleted; don't recreate them.
-- Known issue: `filters.h`/`goertzel.h` use `arm_biquad_cascade_df1_f32_t` /
-  `arm_rfft_fast_f32_t`, defined nowhere in this repo (build relies on the
-  CubeIDE setup on the hardware laptop).
+- CMSIS-DSP is vendored at v1.15.0: sources in `CM7/Core/Src/CMSIS_DSP/`,
+  headers (incl. `dsp/` subfolder) in `Drivers/CMSIS/Include/`. If more CMSIS
+  sources are ever added, take them from that same tag.
 
 ## Conventions
 
